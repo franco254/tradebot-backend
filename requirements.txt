@@ -1,0 +1,12 @@
+flask==3.0.3
+flask-cors==4.0.0
+apscheduler==3.10.4
+pandas==2.2.2
+numpy==1.26.4
+pandas-ta==0.3.14b
+requests==2.31.0
+alpaca-py==0.25.0
+python-binance==1.0.19
+oandapyV20==0.7.2
+gunicorn==22.0.0
+python-dotenv==1.0.1
