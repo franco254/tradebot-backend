@@ -38,7 +38,6 @@ def start_scheduler():
         id='ta_analysis',
         replace_existing=True,
     )
-    # Check SL/TP every 15 seconds
     scheduler.add_job(
         check_sl_tp,
         trigger=IntervalTrigger(seconds=15),
@@ -47,6 +46,9 @@ def start_scheduler():
     )
     scheduler.start()
     print(f"[scheduler] Started — analysis every {interval}s")
+    # Run immediately on startup so signals are ready right away
+    import threading
+    threading.Thread(target=run_analysis, daemon=True).start()
 
 
 # ── MAIN ANALYSIS LOOP ────────────────────────────────────────────────────────
