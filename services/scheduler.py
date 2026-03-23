@@ -55,30 +55,36 @@ def start_scheduler():
 
 def run_analysis():
     if not _bot_enabled:
+        print("[scheduler] Bot disabled, skipping analysis")
         return
 
+    print(f"[scheduler] Starting analysis of {len(WATCHLIST)} symbols...")
     ta = TAEngine(_strategy_config)
     max_trades  = _strategy_config.get('max_open_trades', 3)
     amount_pct  = _strategy_config.get('trade_amount_pct', 2)
     sl_pct      = _strategy_config.get('stop_loss_pct', 1.5)
     tp_pct      = _strategy_config.get('take_profit_pct', 3.0)
-    balance     = 10000.0  # TODO: fetch from portfolio
+    balance     = 10000.0
     amount_usd  = balance * (amount_pct / 100)
 
-    open_trades = get_active_trades()
+    open_trades  = get_active_trades()
     open_symbols = {t['symbol'] for t in open_trades}
 
     for item in WATCHLIST:
         symbol = item['symbol']
         market = item['market']
-
         try:
-            df     = fetch_ohlcv(symbol, market, limit=60)
+            print(f"[scheduler] Fetching {symbol} ({market})...")
+            df = fetch_ohlcv(symbol, market, limit=60)
+            if df is None or len(df) == 0:
+                print(f"[scheduler] No data for {symbol}, skipping")
+                continue
+            print(f"[scheduler] Got {len(df)} candles for {symbol}, analyzing...")
             result = ta.analyze(df)
             signal = result['signal']
             conf   = result['confidence']
+            print(f"[scheduler] {symbol}: {signal} @ {result['price']} (conf:{conf}%)")
 
-            # Cache signal for /signals endpoint
             _signals_cache[symbol] = {
                 'symbol':     symbol,
                 'market':     market,
@@ -89,12 +95,10 @@ def run_analysis():
                 'updated_at': datetime.utcnow().isoformat(),
             }
 
-            # Auto-trade: only if confident + slot available + not already open
             if (signal in ('BUY', 'SELL')
                     and conf >= 70
                     and len(open_trades) < max_trades
                     and symbol not in open_symbols):
-
                 order = place_order(symbol, market, signal, amount_usd, sl_pct, tp_pct)
                 if order['success']:
                     msg = f"{signal} {symbol} @ {result['price']} (conf: {conf}%)"
@@ -103,7 +107,11 @@ def run_analysis():
                     open_trades = get_active_trades()
 
         except Exception as e:
-            print(f"[scheduler] Error analyzing {symbol}: {e}")
+            import traceback
+            print(f"[scheduler] ERROR analyzing {symbol}: {e}")
+            print(traceback.format_exc())
+
+    print(f"[scheduler] Analysis complete. Cache has {len(_signals_cache)} signals.")
 
 
 # ── SL/TP MONITOR ─────────────────────────────────────────────────────────────
