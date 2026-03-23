@@ -75,6 +75,7 @@ def run_analysis():
         market = item['market']
         try:
             print(f"[scheduler] Fetching {symbol} ({market})...")
+            import signal as sig_module
             df = fetch_ohlcv(symbol, market, limit=60)
             if df is None or len(df) == 0:
                 print(f"[scheduler] No data for {symbol}, skipping")
