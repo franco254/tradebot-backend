@@ -46,9 +46,14 @@ def start_scheduler():
     )
     scheduler.start()
     print(f"[scheduler] Started — analysis every {interval}s")
-    # Run immediately on startup so signals are ready right away
+    # Delay startup run so gunicorn finishes booting first
+    def delayed_start():
+        import time
+        time.sleep(10)
+        print("[scheduler] Running startup analysis...")
+        run_analysis()
     import threading
-    threading.Thread(target=run_analysis, daemon=True).start()
+    threading.Thread(target=delayed_start, daemon=True).start()
 
 
 # ── MAIN ANALYSIS LOOP ────────────────────────────────────────────────────────
