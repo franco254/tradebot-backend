@@ -32,6 +32,16 @@ scheduler = BackgroundScheduler(timezone='UTC')
 
 def start_scheduler():
     interval = int(os.getenv('POLL_INTERVAL_SECONDS', 30))
+
+    # Fire immediately on first run using a date trigger
+    from apscheduler.triggers.date import DateTrigger
+    from datetime import timedelta
+    scheduler.add_job(
+        run_analysis,
+        trigger=DateTrigger(run_date=datetime.utcnow() + timedelta(seconds=2)),
+        id='ta_analysis_startup',
+    )
+    # Then repeat on interval
     scheduler.add_job(
         run_analysis,
         trigger=IntervalTrigger(seconds=interval),
@@ -45,15 +55,7 @@ def start_scheduler():
         replace_existing=True,
     )
     scheduler.start()
-    print(f"[scheduler] Started — analysis every {interval}s")
-    # Delay startup run so gunicorn finishes booting first
-    def delayed_start():
-        import time
-        time.sleep(10)
-        print("[scheduler] Running startup analysis...")
-        run_analysis()
-    import threading
-    threading.Thread(target=delayed_start, daemon=True).start()
+    print(f"[scheduler] Started — analysis every {interval}s, first run in 2s")
 
 
 # ── MAIN ANALYSIS LOOP ────────────────────────────────────────────────────────
