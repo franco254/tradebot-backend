@@ -83,7 +83,7 @@ def run_analysis():
         try:
             print(f"[scheduler] Fetching {symbol} ({market})...")
             import signal as sig_module
-            df = fetch_ohlcv(symbol, market, limit=60)
+            df = fetch_ohlcv(symbol, market, limit=250)  # need 250 for EMA200
             if df is None or len(df) == 0:
                 print(f"[scheduler] No data for {symbol}, skipping")
                 continue
@@ -118,6 +118,8 @@ def run_analysis():
             import traceback
             print(f"[scheduler] ERROR analyzing {symbol}: {e}")
             print(traceback.format_exc())
+        finally:
+            import time; time.sleep(1)  # avoid API rate limits between symbols
 
     print(f"[scheduler] Analysis complete. Cache has {len(_signals_cache)} signals.")
 
