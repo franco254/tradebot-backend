@@ -31,30 +31,16 @@ def health():
 
 def start_background_services():
     """
-    Start the scheduler + analysis loop.
-    Must be called AFTER gunicorn forks a worker, not in the master process.
-    With --preload, threads started in the master are killed on fork.
-    Called from gunicorn.conf.py post_fork hook, and directly for local dev.
+    Start the APScheduler — must be called AFTER gunicorn forks the worker.
+    Called from gunicorn.conf.py post_fork hook (production)
+    and directly below for local `python app.py` dev.
+
+    The scheduler runs run_analysis() on its own interval.
+    No separate background thread needed — that was causing double runs.
     """
-    import threading
-    import time
-    from services.scheduler import start_scheduler, run_analysis
-
+    from services.scheduler import start_scheduler
     start_scheduler()
-
-    def _analysis_loop():
-        print(f"[app] Analysis loop started in worker pid={os.getpid()}", flush=True)
-        time.sleep(5)
-        while True:
-            try:
-                run_analysis()
-            except Exception as e:
-                print(f"[app] Analysis error: {e}", flush=True)
-            time.sleep(30)
-
-    t = threading.Thread(target=_analysis_loop, daemon=True)
-    t.start()
-    print(f"[app] Background thread started (pid={os.getpid()})", flush=True)
+    print(f"[app] Scheduler started in worker pid={os.getpid()}", flush=True)
 
 
 # ── Local dev only ──
