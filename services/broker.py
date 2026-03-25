@@ -16,44 +16,71 @@ _active_trades  = []
 _trade_history  = []
 _equity_curve   = []   # list of {date, equity}
 
+# ── Price cache (avoid hammering external APIs every 30s) ─────────────────────
+_ohlcv_cache      = {}
+_ohlcv_cache_time = {}
+CACHE_SECONDS     = 25
+
 
 # ── PRICE DATA ────────────────────────────────────────────────────────────────
 
 def fetch_ohlcv(symbol: str, market: str, limit: int = 100) -> pd.DataFrame:
     market = market.upper()
+
+    # Return cached data if fresh enough
+    cache_key = f"{symbol}:{limit}"
+    now = datetime.utcnow()
+    if cache_key in _ohlcv_cache_time:
+        age = (now - _ohlcv_cache_time[cache_key]).total_seconds()
+        if age < CACHE_SECONDS:
+            return _ohlcv_cache[cache_key]
+
     try:
         if market == 'CRYPTO':
-            return _fetch_crypto_ohlcv(symbol, limit)
+            df = _fetch_crypto_ohlcv(symbol, limit)
         elif market == 'FOREX':
-            return _fetch_forex_ohlcv(symbol, limit)
+            df = _fetch_forex_ohlcv(symbol, limit)
         elif market == 'STOCKS':
-            return _fetch_stocks_ohlcv(symbol, limit)
+            df = _fetch_stocks_ohlcv(symbol, limit)
+        else:
+            df = None
+
+        if df is not None and len(df) > 0:
+            _ohlcv_cache[cache_key] = df
+            _ohlcv_cache_time[cache_key] = now
+            return df
     except Exception as e:
         print(f"[broker] fetch_ohlcv failed ({symbol}): {e} — using synthetic data")
-    # Always fall back to synthetic so analysis never blocks
-    base = 85000 if 'BTC' in symbol else 3500 if 'ETH' in symbol else 150 if 'SOL' in symbol else 1.08 if 'EUR' in symbol else 1.26 if 'GBP' in symbol else 180
-    vol  = 500 if 'BTC' in symbol else 50 if 'ETH' in symbol else 2 if 'SOL' in symbol else 0.002
+
+    # Synthetic fallback with realistic prices
+    bases = {
+        'BTC': 85000, 'ETH': 2000, 'SOL': 135,
+        'EUR': 1.08,  'GBP': 1.26,
+        'AAPL': 210,  'TSLA': 250,
+    }
+    vols = {
+        'BTC': 800, 'ETH': 40, 'SOL': 3,
+        'EUR': 0.003, 'GBP': 0.004,
+        'AAPL': 3, 'TSLA': 8,
+    }
+    key = next((k for k in bases if k in symbol), None)
+    base = bases.get(key, 100)
+    vol  = vols.get(key, 1)
     return _synthetic_ohlcv(symbol, limit, base=base, volatility=vol)
 
 
 def _fetch_crypto_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
-    """CoinGecko free API — more reliable than Binance on cloud servers."""
-    coin_map = {
-        'BTC/USDT': 'bitcoin',
-        'ETH/USDT': 'ethereum',
-        'SOL/USDT': 'solana',
+    """Binance public REST API — no key needed, no rate limit issues."""
+    binance_symbol = symbol.replace('/', '')  # BTC/USDT -> BTCUSDT
+    url = 'https://api.binance.com/api/v3/klines'
+    params = {
+        'symbol':   binance_symbol,
+        'interval': '1h',
+        'limit':    limit,
     }
-    coin_id = coin_map.get(symbol)
-    if not coin_id:
-        raise ValueError(f"Unknown crypto symbol: {symbol}")
-
-    # CoinGecko OHLC endpoint — free, no key needed
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    params = {'vs_currency': 'usd', 'days': '7'}
-    r = requests.get(url, params=params, timeout=10,
-                     headers={'Accept': 'application/json'})
+    r = requests.get(url, params=params, timeout=10)
     r.raise_for_status()
-    data = r.json()  # [[timestamp, open, high, low, close], ...]
+    data = r.json()  # [[open_time, open, high, low, close, volume, ...], ...]
 
     rows = []
     for candle in data:
@@ -63,22 +90,20 @@ def _fetch_crypto_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
             'high':   float(candle[2]),
             'low':    float(candle[3]),
             'close':  float(candle[4]),
-            'volume': 0.0,
+            'volume': float(candle[5]),
         })
     df = pd.DataFrame(rows).set_index('timestamp')
     return df.tail(limit)
 
 
 def _fetch_forex_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
-    """
-    Free forex via exchangerate.host or OANDA practice (if key configured).
-    For demo: returns synthetic data if no key present.
-    """
     api_key = os.getenv('OANDA_API_KEY')
     if api_key:
         return _fetch_oanda_ohlcv(symbol, limit, api_key)
-    # Fallback: generate synthetic realistic data for testing
-    return _synthetic_ohlcv(symbol, limit, base=1.08, volatility=0.002)
+    # No key — synthetic with realistic prices
+    bases = {'EUR/USD': 1.08, 'GBP/USD': 1.26}
+    base  = bases.get(symbol, 1.10)
+    return _synthetic_ohlcv(symbol, limit, base=base, volatility=0.003)
 
 
 def _fetch_oanda_ohlcv(symbol: str, limit: int, api_key: str) -> pd.DataFrame:
@@ -105,17 +130,17 @@ def _fetch_oanda_ohlcv(symbol: str, limit: int, api_key: str) -> pd.DataFrame:
             'close': float(mid['c']),
             'volume': float(c.get('volume', 0))
         })
-    df = pd.DataFrame(rows).set_index('timestamp')
-    return df
+    return pd.DataFrame(rows).set_index('timestamp')
 
 
 def _fetch_stocks_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
-    """Alpaca free data API or synthetic fallback."""
     api_key    = os.getenv('ALPACA_API_KEY')
     api_secret = os.getenv('ALPACA_SECRET_KEY')
     if api_key and api_secret:
         return _fetch_alpaca_ohlcv(symbol, limit, api_key, api_secret)
-    return _synthetic_ohlcv(symbol, limit, base=180.0, volatility=2.0)
+    bases = {'AAPL': 210, 'TSLA': 250}
+    base  = bases.get(symbol, 150)
+    return _synthetic_ohlcv(symbol, limit, base=base, volatility=3.0)
 
 
 def _fetch_alpaca_ohlcv(symbol, limit, api_key, api_secret) -> pd.DataFrame:
@@ -142,19 +167,21 @@ def _fetch_alpaca_ohlcv(symbol, limit, api_key, api_secret) -> pd.DataFrame:
 
 
 def _synthetic_ohlcv(symbol: str, limit: int, base: float, volatility: float) -> pd.DataFrame:
-    """Generates realistic-looking OHLCV data for testing without API keys."""
+    """Generates realistic-looking OHLCV data. Uses time-based seed so prices drift naturally."""
     import numpy as np
-    np.random.seed(abs(hash(symbol)) % 9999)
+    # Use hour-of-day seed so data changes each hour but is stable within a cycle
+    seed = abs(hash(symbol)) % 9999 + (datetime.utcnow().hour * 7)
+    np.random.seed(seed % 2**32)
     closes = [base]
     for _ in range(limit - 1):
-        change = np.random.normal(0, volatility)
-        closes.append(max(closes[-1] * (1 + change), 0.0001))
+        pct_change = np.random.normal(0, volatility / base)
+        closes.append(max(closes[-1] * (1 + pct_change), 0.0001))
     timestamps = [datetime.utcnow() - timedelta(hours=limit - i) for i in range(limit)]
     rows = []
     for i, (ts, c) in enumerate(zip(timestamps, closes)):
         o = closes[i-1] if i > 0 else c
-        h = max(o, c) * (1 + abs(np.random.normal(0, volatility * 0.5)))
-        l = min(o, c) * (1 - abs(np.random.normal(0, volatility * 0.5)))
+        h = max(o, c) * (1 + abs(np.random.normal(0, (volatility / base) * 0.5)))
+        l = min(o, c) * (1 - abs(np.random.normal(0, (volatility / base) * 0.5)))
         rows.append({'timestamp': ts, 'open': o, 'high': h, 'low': l,
                      'close': c, 'volume': np.random.uniform(1000, 50000)})
     return pd.DataFrame(rows).set_index('timestamp')
@@ -164,10 +191,6 @@ def _synthetic_ohlcv(symbol: str, limit: int, base: float, volatility: float) ->
 
 def place_order(symbol: str, market: str, direction: str,
                 amount_usd: float, sl_pct: float, tp_pct: float) -> dict:
-    """
-    Place a paper/live trade order.
-    Routes to correct broker based on market.
-    """
     price = get_current_price(symbol, market)
     if not price:
         return {'success': False, 'error': 'Could not fetch price'}
@@ -176,20 +199,18 @@ def place_order(symbol: str, market: str, direction: str,
     tp = price * (1 + tp_pct/100) if direction == 'BUY' else price * (1 - tp_pct/100)
 
     trade = {
-        'id':        f"{symbol}_{int(datetime.utcnow().timestamp())}",
-        'symbol':    symbol,
-        'market':    market,
-        'direction': direction,
-        'entry':     price,
-        'sl':        round(sl, 6),
-        'tp':        round(tp, 6),
+        'id':         f"{symbol}_{int(datetime.utcnow().timestamp())}",
+        'symbol':     symbol,
+        'market':     market,
+        'direction':  direction,
+        'entry':      price,
+        'sl':         round(sl, 6),
+        'tp':         round(tp, 6),
         'amount_usd': amount_usd,
-        'pnl':       0.0,
-        'opened_at': datetime.utcnow().isoformat(),
-        'status':    'open',
+        'pnl':        0.0,
+        'opened_at':  datetime.utcnow().isoformat(),
+        'status':     'open',
     }
-
-    # Paper trading: just add to active trades list
     _active_trades.append(trade)
     _update_portfolio()
     return {'success': True, 'trade': trade}
@@ -204,9 +225,9 @@ def close_trade(trade_id: str) -> dict:
                 t['pnl'] = round((price - t['entry']) / t['entry'] * t['amount_usd'], 2)
             else:
                 t['pnl'] = round((t['entry'] - price) / t['entry'] * t['amount_usd'], 2)
-            t['exit'] = price
+            t['exit']      = price
             t['closed_at'] = datetime.utcnow().isoformat()
-            t['status'] = 'closed'
+            t['status']    = 'closed'
             _trade_history.insert(0, t)
             _active_trades = [x for x in _active_trades if x['id'] != trade_id]
             _update_portfolio()
@@ -216,23 +237,22 @@ def close_trade(trade_id: str) -> dict:
 
 def close_all_trades() -> dict:
     ids = [t['id'] for t in _active_trades]
-    results = [close_trade(tid) for tid in ids]
-    return {'success': True, 'closed': len(results)}
+    for tid in ids:
+        close_trade(tid)
+    return {'success': True, 'closed': len(ids)}
 
 
 def get_current_price(symbol: str, market: str) -> float:
-    """Fetch latest price for a symbol."""
+    """Fetch latest price — uses OHLCV cache where possible."""
     try:
         if market.upper() == 'CRYPTO':
-            coin_map = {'BTC/USDT':'bitcoin','ETH/USDT':'ethereum','SOL/USDT':'solana'}
-            coin_id = coin_map.get(symbol)
-            if coin_id:
-                r = requests.get(
-                    f"https://api.coingecko.com/api/v3/simple/price",
-                    params={'ids': coin_id, 'vs_currencies': 'usd'},
-                    timeout=8
-                )
-                return float(r.json()[coin_id]['usd'])
+            binance_symbol = symbol.replace('/', '')
+            r = requests.get(
+                'https://api.binance.com/api/v3/ticker/price',
+                params={'symbol': binance_symbol},
+                timeout=8
+            )
+            return float(r.json()['price'])
     except Exception:
         pass
     df = fetch_ohlcv(symbol, market, limit=2)
@@ -247,7 +267,6 @@ def get_portfolio() -> dict:
 
 
 def get_active_trades() -> list:
-    # Update live PnL for open trades
     for t in _active_trades:
         price = get_current_price(t['symbol'], t['market'])
         if price:
@@ -259,31 +278,30 @@ def get_active_trades() -> list:
 
 
 def get_trade_history() -> list:
-    return _trade_history[:50]   # last 50 trades
+    return _trade_history[:50]
 
 
 def get_equity_curve() -> list:
-    return _equity_curve[-30:]   # last 30 data points
+    return _equity_curve[-30:]
 
 
 def _update_portfolio():
     global _portfolio
-    open_pnl  = sum(t.get('pnl', 0) for t in _active_trades)
+    open_pnl   = sum(t.get('pnl', 0) for t in _active_trades)
     closed_pnl = sum(t.get('pnl', 0) for t in _trade_history)
-    wins = [t for t in _trade_history if t.get('pnl', 0) > 0]
-    win_rate = round(len(wins) / len(_trade_history) * 100, 1) if _trade_history else 0.0
-    today_pnl = sum(
+    wins       = [t for t in _trade_history if t.get('pnl', 0) > 0]
+    win_rate   = round(len(wins) / len(_trade_history) * 100, 1) if _trade_history else 0.0
+    today_pnl  = sum(
         t.get('pnl', 0) for t in _trade_history
         if t.get('closed_at', '')[:10] == datetime.utcnow().strftime('%Y-%m-%d')
     )
     _portfolio.update({
-        'equity':    round(10000.0 + closed_pnl + open_pnl, 2),
-        'today_pnl': round(today_pnl, 2),
-        'total_pnl': round(closed_pnl + open_pnl, 2),
-        'win_rate':  win_rate,
+        'equity':      round(10000.0 + closed_pnl + open_pnl, 2),
+        'today_pnl':   round(today_pnl, 2),
+        'total_pnl':   round(closed_pnl + open_pnl, 2),
+        'win_rate':    win_rate,
         'open_trades': len(_active_trades),
     })
-    # Append to equity curve
     _equity_curve.append({
         'date':   datetime.utcnow().strftime('%Y-%m-%d %H:%M'),
         'equity': _portfolio['equity']
