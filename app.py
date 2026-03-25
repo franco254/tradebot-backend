@@ -2,8 +2,6 @@ from flask import Flask
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
-import threading
-import time
 
 from routes.signals import signals_bp
 from routes.trades import trades_bp
@@ -11,7 +9,6 @@ from routes.portfolio import portfolio_bp
 from routes.backtest import backtest_bp
 from routes.alerts import alerts_bp
 from routes.config import config_bp
-from services.scheduler import start_scheduler, run_analysis
 
 load_dotenv()
 
@@ -31,24 +28,37 @@ app.register_blueprint(config_bp,    url_prefix='/config')
 def health():
     return {'status': 'ok', 'service': 'TradeBot Backend'}
 
-# ── Start scheduler ──
-start_scheduler()
 
-# ── Background analysis loop (works with gunicorn --preload) ──
-def _analysis_loop():
-    print("[app] Background analysis loop started")
-    time.sleep(5)  # Wait for app to fully boot
-    while True:
-        try:
-            run_analysis()
-        except Exception as e:
-            print(f"[app] Analysis loop error: {e}")
-        time.sleep(30)
+def start_background_services():
+    """
+    Start the scheduler + analysis loop.
+    Must be called AFTER gunicorn forks a worker, not in the master process.
+    With --preload, threads started in the master are killed on fork.
+    Called from gunicorn.conf.py post_fork hook, and directly for local dev.
+    """
+    import threading
+    import time
+    from services.scheduler import start_scheduler, run_analysis
 
-_bg_thread = threading.Thread(target=_analysis_loop, daemon=True)
-_bg_thread.start()
-print("[app] Background thread started")
+    start_scheduler()
 
+    def _analysis_loop():
+        print(f"[app] Analysis loop started in worker pid={os.getpid()}", flush=True)
+        time.sleep(5)
+        while True:
+            try:
+                run_analysis()
+            except Exception as e:
+                print(f"[app] Analysis error: {e}", flush=True)
+            time.sleep(30)
+
+    t = threading.Thread(target=_analysis_loop, daemon=True)
+    t.start()
+    print(f"[app] Background thread started (pid={os.getpid()})", flush=True)
+
+
+# ── Local dev only ──
 if __name__ == '__main__':
+    start_background_services()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
