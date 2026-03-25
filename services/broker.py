@@ -70,30 +70,87 @@ def fetch_ohlcv(symbol: str, market: str, limit: int = 100) -> pd.DataFrame:
 
 
 def _fetch_crypto_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
-    """Binance public REST API — no key needed, no rate limit issues."""
-    binance_symbol = symbol.replace('/', '')  # BTC/USDT -> BTCUSDT
-    url = 'https://api.binance.com/api/v3/klines'
-    params = {
-        'symbol':   binance_symbol,
-        'interval': '1h',
-        'limit':    limit,
+    """
+    Kraken public REST API — no key, no geo-blocks on Render/AWS.
+    Falls back to KuCoin if Kraken fails.
+    Binance is avoided: it returns 451 from US cloud IPs (AWS/Render).
+    """
+    # Try Kraken first
+    try:
+        return _fetch_kraken_ohlcv(symbol, limit)
+    except Exception as e:
+        print(f"[broker] Kraken failed for {symbol}: {e}, trying KuCoin...")
+
+    # Fallback: KuCoin
+    return _fetch_kucoin_ohlcv(symbol, limit)
+
+
+def _fetch_kraken_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
+    kraken_map = {
+        'BTC/USDT': 'XBTUSD',
+        'ETH/USDT': 'ETHUSD',
+        'SOL/USDT': 'SOLUSD',
     }
+    pair = kraken_map.get(symbol)
+    if not pair:
+        raise ValueError(f"No Kraken mapping for {symbol}")
+
+    url = 'https://api.kraken.com/0/public/OHLC'
+    params = {'pair': pair, 'interval': 60}  # 60 = 1 hour
     r = requests.get(url, params=params, timeout=10)
     r.raise_for_status()
-    data = r.json()  # [[open_time, open, high, low, close, volume, ...], ...]
+    data = r.json()
+    if data.get('error'):
+        raise ValueError(f"Kraken error: {data['error']}")
+
+    # Result key is the pair name (may differ slightly)
+    result_key = list(data['result'].keys())[0]  # ignore 'last'
+    if result_key == 'last':
+        result_key = list(data['result'].keys())[1]
+    candles = data['result'][result_key]
 
     rows = []
-    for candle in data:
+    for c in candles[-limit:]:
+        # [time, open, high, low, close, vwap, volume, count]
         rows.append({
-            'timestamp': pd.to_datetime(candle[0], unit='ms'),
-            'open':   float(candle[1]),
-            'high':   float(candle[2]),
-            'low':    float(candle[3]),
-            'close':  float(candle[4]),
-            'volume': float(candle[5]),
+            'timestamp': pd.to_datetime(int(c[0]), unit='s'),
+            'open':   float(c[1]),
+            'high':   float(c[2]),
+            'low':    float(c[3]),
+            'close':  float(c[4]),
+            'volume': float(c[6]),
         })
-    df = pd.DataFrame(rows).set_index('timestamp')
-    return df.tail(limit)
+    return pd.DataFrame(rows).set_index('timestamp')
+
+
+def _fetch_kucoin_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
+    kucoin_map = {
+        'BTC/USDT': 'BTC-USDT',
+        'ETH/USDT': 'ETH-USDT',
+        'SOL/USDT': 'SOL-USDT',
+    }
+    pair = kucoin_map.get(symbol)
+    if not pair:
+        raise ValueError(f"No KuCoin mapping for {symbol}")
+
+    url = 'https://api.kucoin.com/api/v1/market/candles'
+    params = {'type': '1hour', 'symbol': pair}
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json().get('data', [])
+
+    rows = []
+    for c in reversed(data[:limit]):
+        # [time, open, close, high, low, volume, turnover]
+        rows.append({
+            'timestamp': pd.to_datetime(int(c[0]), unit='s'),
+            'open':   float(c[1]),
+            'high':   float(c[3]),
+            'low':    float(c[4]),
+            'close':  float(c[2]),
+            'volume': float(c[5]),
+        })
+    return pd.DataFrame(rows).set_index('timestamp')
 
 
 def _fetch_forex_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
@@ -243,16 +300,24 @@ def close_all_trades() -> dict:
 
 
 def get_current_price(symbol: str, market: str) -> float:
-    """Fetch latest price — uses OHLCV cache where possible."""
+    """Fetch latest price via Kraken ticker (crypto) or OHLCV cache."""
     try:
         if market.upper() == 'CRYPTO':
-            binance_symbol = symbol.replace('/', '')
-            r = requests.get(
-                'https://api.binance.com/api/v3/ticker/price',
-                params={'symbol': binance_symbol},
-                timeout=8
-            )
-            return float(r.json()['price'])
+            kraken_map = {
+                'BTC/USDT': 'XBTUSD',
+                'ETH/USDT': 'ETHUSD',
+                'SOL/USDT': 'SOLUSD',
+            }
+            pair = kraken_map.get(symbol)
+            if pair:
+                r = requests.get(
+                    'https://api.kraken.com/0/public/Ticker',
+                    params={'pair': pair},
+                    timeout=8
+                )
+                data = r.json()
+                result_key = [k for k in data['result'] if k != 'last'][0]
+                return float(data['result'][result_key]['c'][0])
     except Exception:
         pass
     df = fetch_ohlcv(symbol, market, limit=2)
