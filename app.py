@@ -2,6 +2,8 @@ from flask import Flask
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
+import threading
+import time
 
 from routes.signals import signals_bp
 from routes.trades import trades_bp
@@ -9,7 +11,7 @@ from routes.portfolio import portfolio_bp
 from routes.backtest import backtest_bp
 from routes.alerts import alerts_bp
 from routes.config import config_bp
-from services.scheduler import start_scheduler
+from services.scheduler import start_scheduler, run_analysis
 
 load_dotenv()
 
@@ -29,8 +31,23 @@ app.register_blueprint(config_bp,    url_prefix='/config')
 def health():
     return {'status': 'ok', 'service': 'TradeBot Backend'}
 
-# ── Start background scheduler ──
+# ── Start scheduler ──
 start_scheduler()
+
+# ── Background analysis loop (works with gunicorn --preload) ──
+def _analysis_loop():
+    print("[app] Background analysis loop started")
+    time.sleep(5)  # Wait for app to fully boot
+    while True:
+        try:
+            run_analysis()
+        except Exception as e:
+            print(f"[app] Analysis loop error: {e}")
+        time.sleep(30)
+
+_bg_thread = threading.Thread(target=_analysis_loop, daemon=True)
+_bg_thread.start()
+print("[app] Background thread started")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
