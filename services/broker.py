@@ -37,28 +37,36 @@ def fetch_ohlcv(symbol: str, market: str, limit: int = 100) -> pd.DataFrame:
 
 
 def _fetch_crypto_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
-    """Binance public API — no key required for price data."""
-    binance_symbol = symbol.replace('/', '')
-    url = f"https://api.binance.com/api/v3/klines"
-    params = {'symbol': binance_symbol, 'interval': '1h', 'limit': limit}
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        r.raise_for_status()
-    except Exception:
-        # Binance blocked or slow — try backup endpoint
-        url = f"https://api1.binance.com/api/v3/klines"
-        r = requests.get(url, params=params, timeout=8)
-        r.raise_for_status()
-    data = r.json()
-    df = pd.DataFrame(data, columns=[
-        'timestamp','open','high','low','close','volume',
-        'close_time','qav','num_trades','taker_base','taker_quote','ignore'
-    ])
-    df = df[['timestamp','open','high','low','close','volume']].copy()
-    for col in ['open','high','low','close','volume']:
-        df[col] = pd.to_numeric(df[col])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df.set_index('timestamp')
+    """CoinGecko free API — more reliable than Binance on cloud servers."""
+    coin_map = {
+        'BTC/USDT': 'bitcoin',
+        'ETH/USDT': 'ethereum',
+        'SOL/USDT': 'solana',
+    }
+    coin_id = coin_map.get(symbol)
+    if not coin_id:
+        raise ValueError(f"Unknown crypto symbol: {symbol}")
+
+    # CoinGecko OHLC endpoint — free, no key needed
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    params = {'vs_currency': 'usd', 'days': '7'}
+    r = requests.get(url, params=params, timeout=10,
+                     headers={'Accept': 'application/json'})
+    r.raise_for_status()
+    data = r.json()  # [[timestamp, open, high, low, close], ...]
+
+    rows = []
+    for candle in data:
+        rows.append({
+            'timestamp': pd.to_datetime(candle[0], unit='ms'),
+            'open':   float(candle[1]),
+            'high':   float(candle[2]),
+            'low':    float(candle[3]),
+            'close':  float(candle[4]),
+            'volume': 0.0,
+        })
+    df = pd.DataFrame(rows).set_index('timestamp')
+    return df.tail(limit)
 
 
 def _fetch_forex_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
@@ -213,18 +221,20 @@ def close_all_trades() -> dict:
 
 
 def get_current_price(symbol: str, market: str) -> float:
-    """Fetch just the latest price for a symbol."""
+    """Fetch latest price for a symbol."""
     try:
         if market.upper() == 'CRYPTO':
-            binance_symbol = symbol.replace('/', '')
-            r = requests.get(
-                f"https://api.binance.com/api/v3/ticker/price",
-                params={'symbol': binance_symbol}, timeout=5
-            )
-            return float(r.json()['price'])
+            coin_map = {'BTC/USDT':'bitcoin','ETH/USDT':'ethereum','SOL/USDT':'solana'}
+            coin_id = coin_map.get(symbol)
+            if coin_id:
+                r = requests.get(
+                    f"https://api.coingecko.com/api/v3/simple/price",
+                    params={'ids': coin_id, 'vs_currencies': 'usd'},
+                    timeout=8
+                )
+                return float(r.json()[coin_id]['usd'])
     except Exception:
         pass
-    # Fallback: use last candle close
     df = fetch_ohlcv(symbol, market, limit=2)
     return float(df['close'].iloc[-1]) if df is not None and len(df) else None
 
