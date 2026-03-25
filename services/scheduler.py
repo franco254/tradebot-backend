@@ -1,5 +1,7 @@
 import os
-import json
+import time
+import threading
+import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime
@@ -9,6 +11,7 @@ from services.broker import (
     fetch_ohlcv, place_order, get_active_trades,
     close_trade, get_current_price
 )
+from services.persistence import load as _load_state, save as _save_state
 
 # ── Watched symbols ───────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -21,11 +24,12 @@ WATCHLIST = [
     {'symbol': 'TSLA',     'market': 'STOCKS'},
 ]
 
-# ── Shared signals cache (read by /signals endpoint) ─────────────────────────
+# ── State — restored from disk on startup ────────────────────────────────────
+_boot_state      = _load_state()
 _signals_cache   = {}
 _pending_alerts  = []
-_bot_enabled     = True
-_strategy_config = {}
+_bot_enabled     = _boot_state.get('bot_enabled', True)
+_strategy_config = _boot_state.get('strategy_config', {})
 
 scheduler = BackgroundScheduler(timezone='UTC')
 
@@ -33,29 +37,48 @@ scheduler = BackgroundScheduler(timezone='UTC')
 def start_scheduler():
     interval = int(os.getenv('POLL_INTERVAL_SECONDS', 30))
 
-    # Fire immediately on first run using a date trigger
     from apscheduler.triggers.date import DateTrigger
     from datetime import timedelta
-    scheduler.add_job(
-        run_analysis,
-        trigger=DateTrigger(run_date=datetime.utcnow() + timedelta(seconds=2)),
-        id='ta_analysis_startup',
-    )
-    # Then repeat on interval
-    scheduler.add_job(
-        run_analysis,
+
+    # First analysis in 5s (let server fully boot)
+    scheduler.add_job(run_analysis, trigger=DateTrigger(
+        run_date=datetime.utcnow() + timedelta(seconds=5)),
+        id='ta_analysis_startup')
+
+    # Recurring analysis
+    scheduler.add_job(run_analysis,
         trigger=IntervalTrigger(seconds=interval),
-        id='ta_analysis',
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        check_sl_tp,
+        id='ta_analysis', replace_existing=True)
+
+    # SL/TP monitor every 15s
+    scheduler.add_job(check_sl_tp,
         trigger=IntervalTrigger(seconds=15),
-        id='sl_tp_check',
-        replace_existing=True,
-    )
+        id='sl_tp_check', replace_existing=True)
+
+    # Self-ping every 10 minutes to prevent Render free tier spin-down
+    scheduler.add_job(_self_ping,
+        trigger=IntervalTrigger(minutes=10),
+        id='keep_alive', replace_existing=True)
+
     scheduler.start()
-    print(f"[scheduler] Started — analysis every {interval}s, first run in 2s")
+    print(f"[scheduler] Started — analysis every {interval}s, keep-alive every 10min")
+
+
+# ── KEEP-ALIVE ────────────────────────────────────────────────────────────────
+
+def _self_ping():
+    """
+    Pings our own health endpoint every 10 minutes.
+    Render free tier spins down after 15 minutes of no inbound traffic.
+    This keeps the instance awake 24/7 so the bot never stops trading.
+    """
+    try:
+        port = os.getenv('PORT', '10000')
+        url  = f"http://localhost:{port}/"
+        r = requests.get(url, timeout=5)
+        print(f"[keep-alive] Self-ping OK ({r.status_code})")
+    except Exception as e:
+        print(f"[keep-alive] Self-ping failed: {e}")
 
 
 # ── MAIN ANALYSIS LOOP ────────────────────────────────────────────────────────
@@ -66,11 +89,12 @@ def run_analysis():
         return
 
     print(f"[scheduler] Starting analysis of {len(WATCHLIST)} symbols...")
-    ta = TAEngine(_strategy_config)
-    max_trades  = _strategy_config.get('max_open_trades', 3)
-    amount_pct  = _strategy_config.get('trade_amount_pct', 2)
-    sl_pct      = _strategy_config.get('stop_loss_pct', 1.5)
-    tp_pct      = _strategy_config.get('take_profit_pct', 3.0)
+    ta          = TAEngine(_strategy_config)
+    max_trades  = int(_strategy_config.get('max_open_trades', 3))
+    amount_pct  = float(_strategy_config.get('trade_amount_pct', 2))
+    sl_pct      = float(_strategy_config.get('stop_loss_pct', 1.5))
+    tp_pct      = float(_strategy_config.get('take_profit_pct', 3.0))
+    min_conf    = int(_strategy_config.get('min_confidence', 70))
     balance     = 10000.0
     amount_usd  = balance * (amount_pct / 100)
 
@@ -81,13 +105,11 @@ def run_analysis():
         symbol = item['symbol']
         market = item['market']
         try:
-            print(f"[scheduler] Fetching {symbol} ({market})...")
-            import signal as sig_module
-            df = fetch_ohlcv(symbol, market, limit=250)  # need 250 for EMA200
+            df = fetch_ohlcv(symbol, market, limit=250)
             if df is None or len(df) == 0:
                 print(f"[scheduler] No data for {symbol}, skipping")
                 continue
-            print(f"[scheduler] Got {len(df)} candles for {symbol}, analyzing...")
+
             result = ta.analyze(df)
             signal = result['signal']
             conf   = result['confidence']
@@ -100,17 +122,20 @@ def run_analysis():
                 'confidence': conf,
                 'price':      result['price'],
                 'indicators': result['indicators'],
+                'votes':      result.get('votes', {}),
                 'updated_at': datetime.utcnow().isoformat(),
             }
 
+            # Auto-trade: fire if signal strong enough + room for new trade
             if (signal in ('BUY', 'SELL')
-                    and conf >= 70
+                    and conf >= min_conf
                     and len(open_trades) < max_trades
                     and symbol not in open_symbols):
                 order = place_order(symbol, market, signal, amount_usd, sl_pct, tp_pct)
                 if order['success']:
-                    msg = f"{signal} {symbol} @ {result['price']} (conf: {conf}%)"
+                    msg = f"{signal} {symbol} @ {result['price']} (conf:{conf}%)"
                     _push_alert('trade', msg)
+                    print(f"[scheduler] ✅ Trade opened: {msg}")
                     open_symbols.add(symbol)
                     open_trades = get_active_trades()
 
@@ -119,15 +144,16 @@ def run_analysis():
             print(f"[scheduler] ERROR analyzing {symbol}: {e}")
             print(traceback.format_exc())
         finally:
-            import time; time.sleep(1)  # avoid API rate limits between symbols
+            time.sleep(1)  # rate limit buffer between symbols
 
-    print(f"[scheduler] Analysis complete. Cache has {len(_signals_cache)} signals.")
+    print(f"[scheduler] Analysis complete. Cache: {len(_signals_cache)} signals, "
+          f"{len(open_trades)} open trades.")
 
 
 # ── SL/TP MONITOR ─────────────────────────────────────────────────────────────
 
 def check_sl_tp():
-    """Check if any open trade has hit its stop loss or take profit."""
+    """Check every 15s if any open trade has hit SL or TP."""
     trades = get_active_trades()
     for trade in trades:
         try:
@@ -135,7 +161,6 @@ def check_sl_tp():
             if not price:
                 continue
 
-            hit_tp = hit_sl = False
             if trade['direction'] == 'BUY':
                 hit_tp = price >= trade['tp']
                 hit_sl = price <= trade['sl']
@@ -144,14 +169,16 @@ def check_sl_tp():
                 hit_sl = price >= trade['sl']
 
             if hit_tp:
-                close_trade(trade['id'])
-                _push_alert('tp', f"TP hit: {trade['symbol']} @ {price:.4f} ✓")
+                result = close_trade(trade['id'])
+                pnl = result['trade']['pnl'] if result['success'] else 0
+                _push_alert('tp', f"✅ TP hit: {trade['symbol']} @ {price:.4f} | PnL: ${pnl:+.2f}")
             elif hit_sl:
-                close_trade(trade['id'])
-                _push_alert('sl', f"SL hit: {trade['symbol']} @ {price:.4f} ✗")
+                result = close_trade(trade['id'])
+                pnl = result['trade']['pnl'] if result['success'] else 0
+                _push_alert('sl', f"❌ SL hit: {trade['symbol']} @ {price:.4f} | PnL: ${pnl:+.2f}")
 
         except Exception as e:
-            print(f"[scheduler] SL/TP check error: {e}")
+            print(f"[scheduler] SL/TP check error for {trade.get('symbol')}: {e}")
 
 
 # ── PUBLIC ACCESSORS ──────────────────────────────────────────────────────────
@@ -161,7 +188,7 @@ def get_signals_cache() -> dict:
 
 
 def get_pending_alerts() -> list:
-    alerts = _pending_alerts.copy()
+    alerts = list(_pending_alerts)
     _pending_alerts.clear()
     return alerts
 
@@ -169,12 +196,21 @@ def get_pending_alerts() -> list:
 def set_bot_enabled(enabled: bool):
     global _bot_enabled
     _bot_enabled = enabled
-    print(f"[scheduler] Bot {'enabled' if enabled else 'disabled'}")
+    # Persist so bot state survives restarts
+    state = _load_state()
+    state['bot_enabled'] = enabled
+    _save_state(state)
+    print(f"[scheduler] Bot {'ENABLED ✅' if enabled else 'DISABLED ⏸'}")
 
 
 def update_strategy_config(config: dict):
     global _strategy_config
     _strategy_config = config
+    # Persist so config survives restarts
+    state = _load_state()
+    state['strategy_config'] = config
+    _save_state(state)
+    print(f"[scheduler] Strategy config updated and saved")
 
 
 def _push_alert(alert_type: str, message: str):
