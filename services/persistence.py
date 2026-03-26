@@ -1,69 +1,90 @@
 """
-persistence.py — JSON file-based state persistence.
+persistence.py — Redis-based state persistence via Upstash.
 
-Saves trades, portfolio, and bot config to /tmp/tradebot_state.json
-on every write. On startup, reloads state so trades survive restarts.
+All trade state is saved to Redis on every write and restored on startup.
+Survives Render redeploys, restarts, and free tier container wipes.
 
-Render's /tmp is ephemeral per-instance but survives normal restarts
-within the same running instance. For full persistence across deploys,
-set the DATA_DIR env var to a Render Disk mount path (/data).
+Requires env var: REDIS_URL
 """
 import os
 import json
 import threading
 from datetime import datetime
 
-_lock      = threading.Lock()
-DATA_DIR   = os.getenv('DATA_DIR', '/tmp')
-STATE_FILE = os.path.join(DATA_DIR, 'tradebot_state.json')
+_lock = threading.Lock()
+
+REDIS_URL = os.getenv(
+    'REDIS_URL',
+    'redis://default:gQAAAAAAAQn6AAIncDIxMWMwNzU5OGFkMWU0YjUxYWRjNDA4OWI0OGViNzhlZHAyNjgwOTA@close-dingo-68090.upstash.io:6379'
+)
+STATE_KEY = 'tradebot:state'
 
 _DEFAULTS = {
-    'active_trades':   [],
-    'trade_history':   [],
-    'equity_curve':    [],
+    'active_trades':    [],
+    'trade_history':    [],
+    'equity_curve':     [],
     'portfolio': {
-        'balance':    10000.0,
-        'equity':     10000.0,
-        'today_pnl':  0.0,
-        'total_pnl':  0.0,
-        'win_rate':   0.0,
-        'open_trades': 0,
+        'balance':        10000.0,
+        'equity':         10000.0,
+        'today_pnl':      0.0,
+        'total_pnl':      0.0,
+        'realised_pnl':   0.0,
+        'unrealised_pnl': 0.0,
+        'win_rate':       0.0,
+        'open_trades':    0,
     },
-    'bot_enabled':     True,
-    'strategy_config': {},
+    'bot_enabled':      True,
+    'strategy_config':  {},
 }
+
+_redis_client = None
+
+
+def _get_client():
+    global _redis_client
+    if _redis_client is None:
+        import redis
+        _redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=5)
+    return _redis_client
 
 
 def load() -> dict:
-    """Load state from disk. Returns defaults if file missing or corrupt."""
+    """Load state from Redis. Returns defaults if key missing or error."""
     try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r') as f:
-                data = json.load(f)
-            # Merge with defaults so new keys always exist
+        r = _get_client()
+        raw = r.get(STATE_KEY)
+        if raw:
+            data   = json.loads(raw)
             merged = dict(_DEFAULTS)
             merged.update(data)
-            print(f"[persistence] Loaded state: "
+            # Make sure nested portfolio has all keys
+            for k, v in _DEFAULTS['portfolio'].items():
+                merged['portfolio'].setdefault(k, v)
+            print(f"[persistence] Loaded from Redis: "
                   f"{len(merged['active_trades'])} active trades, "
-                  f"{len(merged['trade_history'])} history")
+                  f"{len(merged['trade_history'])} history, "
+                  f"balance=${merged['portfolio']['balance']}")
             return merged
     except Exception as e:
-        print(f"[persistence] Load failed ({e}), using defaults")
+        print(f"[persistence] Redis load failed ({e}), using defaults")
     return dict(_DEFAULTS)
 
 
 def save(state: dict):
-    """Write state to disk atomically."""
+    """Save state to Redis atomically."""
     with _lock:
         try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            tmp = STATE_FILE + '.tmp'
-            with open(tmp, 'w') as f:
-                json.dump(state, f, default=str, indent=2)
-            os.replace(tmp, STATE_FILE)
+            r   = _get_client()
+            raw = json.dumps(state, default=str)
+            r.set(STATE_KEY, raw)
         except Exception as e:
-            print(f"[persistence] Save failed: {e}")
+            print(f"[persistence] Redis save failed: {e}")
 
 
-def get_state_path() -> str:
-    return STATE_FILE
+def clear():
+    """Wipe state (useful for reset). Called manually if needed."""
+    try:
+        _get_client().delete(STATE_KEY)
+        print("[persistence] State cleared from Redis")
+    except Exception as e:
+        print(f"[persistence] Clear failed: {e}")
