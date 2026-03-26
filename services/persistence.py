@@ -15,7 +15,7 @@ _lock = threading.Lock()
 
 REDIS_URL = os.getenv(
     'REDIS_URL',
-    'redis://default:gQAAAAAAAQn6AAIncDIxMWMwNzU5OGFkMWU0YjUxYWRjNDA4OWI0OGViNzhlZHAyNjgwOTA@close-dingo-68090.upstash.io:6379'
+    'rediss://default:gQAAAAAAAQn6AAIncDIxMWMwNzU5OGFkMWU0YjUxYWRjNDA4OWI0OGViNzhlZHAyNjgwOTA@close-dingo-68090.upstash.io:6379'
 )
 STATE_KEY = 'tradebot:state'
 
@@ -44,7 +44,7 @@ def _get_client():
     global _redis_client
     if _redis_client is None:
         import redis
-        _redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=5)
+        _redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=5, ssl_cert_reqs=None)
     return _redis_client
 
 
