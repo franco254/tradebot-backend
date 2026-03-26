@@ -43,7 +43,7 @@ def fetch_ohlcv(symbol: str, market: str, limit: int = 100) -> pd.DataFrame:
     try:
         if market == 'CRYPTO':
             df = _fetch_crypto_ohlcv(symbol, limit)
-        elif market == 'FOREX':
+        elif market in ('FOREX', 'COMMODITY'):
             df = _fetch_forex_ohlcv(symbol, limit)
         elif market == 'STOCKS':
             df = _fetch_stocks_ohlcv(symbol, limit)
@@ -57,14 +57,27 @@ def fetch_ohlcv(symbol: str, market: str, limit: int = 100) -> pd.DataFrame:
         print(f"[broker] fetch_ohlcv failed ({symbol}): {e} — using synthetic data")
 
     # Synthetic fallback with realistic prices
-    bases = {'BTC': 85000, 'ETH': 2000, 'SOL': 135,
-             'EUR': 1.08,  'GBP': 1.26, 'AAPL': 210, 'TSLA': 250}
-    vols  = {'BTC': 800,   'ETH': 40,   'SOL': 3,
-             'EUR': 0.003, 'GBP': 0.004,'AAPL': 3,   'TSLA': 8}
-    key  = next((k for k in bases if k in symbol), None)
-    return _synthetic_ohlcv(symbol, limit,
-                            base=bases.get(key, 100),
-                            volatility=vols.get(key, 1))
+    bases = {
+        'BTC': 85000, 'ETH': 2000,  'SOL': 135,
+        'XAU': 3100,
+        'EUR/USD': 1.08,  'GBP/USD': 1.27,  'USD/JPY': 149.5,
+        'USD/CHF': 0.90,  'AUD/USD': 0.645, 'USD/CAD': 1.36,
+        'NZD/USD': 0.595, 'EUR/GBP': 0.855, 'EUR/JPY': 161.5,
+        'GBP/JPY': 190.2,
+        'AAPL': 210, 'TSLA': 250,
+    }
+    vols = {
+        'BTC': 800,   'ETH': 40,    'SOL': 3,
+        'XAU': 15,
+        'EUR/USD': 0.003,  'GBP/USD': 0.004,  'USD/JPY': 0.4,
+        'USD/CHF': 0.003,  'AUD/USD': 0.003,  'USD/CAD': 0.004,
+        'NZD/USD': 0.003,  'EUR/GBP': 0.002,  'EUR/JPY': 0.5,
+        'GBP/JPY': 0.6,
+        'AAPL': 3, 'TSLA': 8,
+    }
+    base = bases.get(symbol) or next((v for k, v in bases.items() if k in symbol), 100)
+    vol  = vols.get(symbol)  or next((v for k, v in vols.items()  if k in symbol), 1)
+    return _synthetic_ohlcv(symbol, limit, base=base, volatility=vol)
 
 
 def _fetch_crypto_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
@@ -117,11 +130,26 @@ def _fetch_forex_ohlcv(symbol: str, limit: int) -> pd.DataFrame:
     api_key = os.getenv('OANDA_API_KEY')
     if api_key:
         return _fetch_oanda_ohlcv(symbol, limit, api_key)
-    bases = {'EUR/USD': 1.08, 'GBP/USD': 1.26}
-    return _synthetic_ohlcv(symbol, limit, base=bases.get(symbol, 1.10), volatility=0.003)
+    # No key — use synthetic with realistic per-pair prices
+    bases = {
+        'EUR/USD': 1.08,  'GBP/USD': 1.27,  'USD/JPY': 149.5,
+        'USD/CHF': 0.90,  'AUD/USD': 0.645, 'USD/CAD': 1.36,
+        'NZD/USD': 0.595, 'EUR/GBP': 0.855, 'EUR/JPY': 161.5,
+        'GBP/JPY': 190.2, 'XAU/USD': 3100,
+    }
+    vols = {
+        'EUR/USD': 0.003,  'GBP/USD': 0.004,  'USD/JPY': 0.4,
+        'USD/CHF': 0.003,  'AUD/USD': 0.003,  'USD/CAD': 0.004,
+        'NZD/USD': 0.003,  'EUR/GBP': 0.002,  'EUR/JPY': 0.5,
+        'GBP/JPY': 0.6,    'XAU/USD': 15,
+    }
+    return _synthetic_ohlcv(symbol, limit,
+                            base=bases.get(symbol, 1.10),
+                            volatility=vols.get(symbol, 0.003))
 
 
 def _fetch_oanda_ohlcv(symbol: str, limit: int, api_key: str) -> pd.DataFrame:
+    # OANDA symbol format: EUR_USD, XAU_USD (gold is supported natively)
     oanda_symbol = symbol.replace('/', '_')
     account_type = os.getenv('OANDA_ACCOUNT_TYPE', 'practice')
     base_url = ('https://api-fxtrade.oanda.com' if account_type == 'live'
@@ -250,6 +278,18 @@ def get_current_price(symbol: str, market: str) -> float:
                                  params={'pair': pair}, timeout=8)
                 result_key = next(k for k in r.json()['result'] if k != 'last')
                 return float(r.json()['result'][result_key]['c'][0])
+        elif market.upper() in ('FOREX', 'COMMODITY'):
+            api_key = os.getenv('OANDA_API_KEY')
+            if api_key:
+                oanda_symbol = symbol.replace('/', '_')
+                account_type = os.getenv('OANDA_ACCOUNT_TYPE', 'practice')
+                base_url = ('https://api-fxtrade.oanda.com' if account_type == 'live'
+                            else 'https://api-fxpractice.oanda.com')
+                r = requests.get(f"{base_url}/v3/instruments/{oanda_symbol}/candles",
+                                 headers={'Authorization': f'Bearer {api_key}'},
+                                 params={'count': 1, 'granularity': 'S5', 'price': 'M'},
+                                 timeout=8)
+                return float(r.json()['candles'][-1]['mid']['c'])
     except Exception:
         pass
     df = fetch_ohlcv(symbol, market, limit=2)
