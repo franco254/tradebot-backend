@@ -103,7 +103,7 @@ def run_analysis():
     amount_pct  = float(_strategy_config.get('trade_amount_pct', 2))
     sl_pct      = float(_strategy_config.get('stop_loss_pct', 1.5))
     tp_pct      = float(_strategy_config.get('take_profit_pct', 3.0))
-    min_conf    = int(_strategy_config.get('min_confidence', 70))
+    min_conf    = int(_strategy_config.get('min_confidence', 55))
     balance     = 10000.0
     amount_usd  = balance * (amount_pct / 100)
 
