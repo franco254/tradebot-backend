@@ -15,11 +15,24 @@ from services.persistence import load as _load_state, save as _save_state
 
 # ── Watched symbols ───────────────────────────────────────────────────────────
 WATCHLIST = [
+    # Crypto
     {'symbol': 'BTC/USDT', 'market': 'CRYPTO'},
     {'symbol': 'ETH/USDT', 'market': 'CRYPTO'},
     {'symbol': 'SOL/USDT', 'market': 'CRYPTO'},
+    # Major Forex pairs
     {'symbol': 'EUR/USD',  'market': 'FOREX'},
     {'symbol': 'GBP/USD',  'market': 'FOREX'},
+    {'symbol': 'USD/JPY',  'market': 'FOREX'},
+    {'symbol': 'USD/CHF',  'market': 'FOREX'},
+    {'symbol': 'AUD/USD',  'market': 'FOREX'},
+    {'symbol': 'USD/CAD',  'market': 'FOREX'},
+    {'symbol': 'NZD/USD',  'market': 'FOREX'},
+    {'symbol': 'EUR/GBP',  'market': 'FOREX'},
+    {'symbol': 'EUR/JPY',  'market': 'FOREX'},
+    {'symbol': 'GBP/JPY',  'market': 'FOREX'},
+    # Gold
+    {'symbol': 'XAU/USD',  'market': 'COMMODITY'},
+    # Stocks
     {'symbol': 'AAPL',     'market': 'STOCKS'},
     {'symbol': 'TSLA',     'market': 'STOCKS'},
 ]
@@ -37,17 +50,13 @@ scheduler = BackgroundScheduler(timezone='UTC')
 def start_scheduler():
     interval = int(os.getenv('POLL_INTERVAL_SECONDS', 30))
 
-    from apscheduler.triggers.date import DateTrigger
     from datetime import timedelta
 
-    # First analysis in 5s (let server fully boot)
-    scheduler.add_job(run_analysis, trigger=DateTrigger(
-        run_date=datetime.utcnow() + timedelta(seconds=5)),
-        id='ta_analysis_startup')
-
-    # Recurring analysis
+    # Single recurring job — starts 5s after boot, then every interval.
+    # No separate startup job to avoid overlapping cycles.
     scheduler.add_job(run_analysis,
-        trigger=IntervalTrigger(seconds=interval),
+        trigger=IntervalTrigger(seconds=interval,
+                                start_date=datetime.utcnow() + timedelta(seconds=5)),
         id='ta_analysis', replace_existing=True)
 
     # SL/TP monitor every 15s
