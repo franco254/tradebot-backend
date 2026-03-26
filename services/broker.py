@@ -329,10 +329,17 @@ def _update_portfolio():
     win_rate   = round(len(wins) / len(_trade_history) * 100, 1) if _trade_history else 0.0
     today_pnl  = sum(t.get('pnl', 0) for t in _trade_history
                      if t.get('closed_at', '')[:10] == datetime.utcnow().strftime('%Y-%m-%d'))
+    starting_balance = 10000.0
+    realised_balance  = round(starting_balance + closed_pnl, 2)   # cash after closed trades
+    total_equity      = round(starting_balance + closed_pnl + open_pnl, 2)  # includes open PnL
+
     _portfolio.update({
-        'equity':      round(10000.0 + closed_pnl + open_pnl, 2),
+        'balance':     realised_balance,   # updates as trades close
+        'equity':      total_equity,       # includes unrealised PnL
         'today_pnl':   round(today_pnl, 2),
         'total_pnl':   round(closed_pnl + open_pnl, 2),
+        'realised_pnl': round(closed_pnl, 2),
+        'unrealised_pnl': round(open_pnl, 2),
         'win_rate':    win_rate,
         'open_trades': len(_active_trades),
     })
