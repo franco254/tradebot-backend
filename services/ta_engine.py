@@ -51,9 +51,10 @@ class TAEngine:
         self.stoch_smooth    = int(cfg.get('stoch_smooth', 3))
         self.atr_period      = int(cfg.get('atr_period', 14))
         # Minimum independent strategies that must agree
-        self.min_confluence  = int(cfg.get('min_confluence', 3))
+        self.min_confluence  = int(cfg.get('min_confluence', 2))
         # Minimum weighted score to fire BUY/SELL
-        self.score_threshold = float(cfg.get('score_threshold', 2.5))
+        # Lower threshold lets strong 3-strategy combos reach 70% confidence
+        self.score_threshold = float(cfg.get('score_threshold', 2.0))
 
     # ── PUBLIC ────────────────────────────────────────────────────────────────
 
