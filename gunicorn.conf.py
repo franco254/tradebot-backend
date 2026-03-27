@@ -10,10 +10,9 @@ import os
 
 workers = 1
 bind = f"0.0.0.0:{os.environ.get('PORT', 5000)}"
-timeout = 120
+timeout = 300
 preload_app = True
-worker_class = "gevent"
-worker_connections = 10
+worker_class = "sync"
 
 
 def post_fork(server, worker):
