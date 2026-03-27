@@ -48,7 +48,7 @@ scheduler = BackgroundScheduler(timezone='UTC')
 
 
 def start_scheduler():
-    interval = int(os.getenv('POLL_INTERVAL_SECONDS', 30))
+    interval = int(os.getenv('POLL_INTERVAL_SECONDS', 60))
 
     from datetime import timedelta
 
@@ -114,7 +114,7 @@ def run_analysis():
         symbol = item['symbol']
         market = item['market']
         try:
-            df = fetch_ohlcv(symbol, market, limit=250)
+            df = fetch_ohlcv(symbol, market, limit=150)
             if df is None or len(df) == 0:
                 print(f"[scheduler] No data for {symbol}, skipping")
                 continue
@@ -153,7 +153,7 @@ def run_analysis():
             print(f"[scheduler] ERROR analyzing {symbol}: {e}")
             print(traceback.format_exc())
         finally:
-            time.sleep(1)  # rate limit buffer between symbols
+            time.sleep(2)  # rate limit buffer + CPU breathing room
 
     print(f"[scheduler] Analysis complete. Cache: {len(_signals_cache)} signals, "
           f"{len(open_trades)} open trades.")
